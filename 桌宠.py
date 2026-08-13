@@ -155,6 +155,7 @@ def load_json(path, default):
         return default
 
 
+# [暂时禁用] 聊天输入框（用户输入走 QQ，需要时取消注释恢复）
 class ChatDialog(QDialog):
     """聊天对话框 - 缩小版，匹配气泡样式"""
     def __init__(self, parent=None):
@@ -277,6 +278,7 @@ class ChatDialog(QDialog):
         super().reject()
 
 
+# [暂时禁用] 左键功能面板（输入走 QQ，需要时取消注释恢复）
 class FunctionPanel(QFrame):
     """左键弹出的功能列表 - 白底矩形，只有一个🗨️图标"""
     def __init__(self, parent=None):
@@ -575,7 +577,8 @@ class PetWindow(QWidget):
         self.chat_paused = False
         
         # 功能列表
-        self.function_panel = FunctionPanel(self)
+        # 功能面板/聊天输入框暂时禁用（用户输入走 QQ）
+        # self.function_panel = FunctionPanel(self)
         self.food_panel = FoodPanel(self.on_food)
         # 单击延迟判定（等双击）：单击=回嘴+弹聊天面板，双击=喂食
         self._click_timer = QTimer(self)
@@ -583,7 +586,7 @@ class PetWindow(QWidget):
         self._click_timer.timeout.connect(self._on_single_click)
         
         # 聊天对话框
-        self.chat_dialog = ChatDialog(self)
+        # self.chat_dialog = ChatDialog(self)
 
         # 独立气泡窗（智能选位，不遮挡立绘）
         self.bubble_window = BubbleWindow()
@@ -613,17 +616,8 @@ class PetWindow(QWidget):
 
     # ---------- AI 方法 ----------
     def _call_ds(self, user_msg):
-        """对话走插件：注入主人 QQ 会话，回复由插件同步回气泡"""
-        def worker():
-            try:
-                requests.post(
-                    f"{PLUGIN_API}/pet/input",
-                    json={"text": user_msg},
-                    timeout=5,
-                )
-            except Exception:
-                self.say("连不上 AstrBot，检查它是否在运行")
-        threading.Thread(target=worker, daemon=True).start()
+        """对话走插件：注入主人 QQ 会话，回复由插件同步回气泡（暂时禁用，输入走 QQ）"""
+        pass
 
     # ---------- 绘制 ----------
     def paintEvent(self, _):
@@ -861,8 +855,7 @@ class PetWindow(QWidget):
             self.last_press_pos = e.globalPosition().toPoint()
             self.dragging = False
             self.drag_start_pos = e.globalPosition().toPoint()
-            self.function_panel.hide()
-            self.chat_dialog.hide()
+            # 功能面板/聊天框已禁用
             self.chat_paused = True
 
     def mouseMoveEvent(self, e):
@@ -901,8 +894,30 @@ class PetWindow(QWidget):
             self._click_timer.stop()
             self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
 
+    def _set_direction_target(self, direction):
+        """方向指令：把目标设到屏幕对应位置，鱼会走过去"""
+        geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        cx, cy = self.x() + self.width() / 2, self.y() + self.height() / 2
+        margin = 60
+        targets = {
+            "right": (geo.right() - self.width() - margin, cy),
+            "left": (geo.left() + margin, cy),
+            "up": (cx, geo.top() + margin),
+            "down": (cx, geo.bottom() - self.height() - margin),
+            "top_left": (geo.left() + margin, geo.top() + margin),
+            "top_right": (geo.right() - self.width() - margin, geo.top() + margin),
+            "bottom_left": (geo.left() + margin, geo.bottom() - self.height() - margin),
+            "bottom_right": (geo.right() - self.width() - margin, geo.bottom() - self.height() - margin),
+        }
+        if direction not in targets:
+            return
+        if self.mode != "wander":
+            self.set_mode("wander")   # still/follow 不处理自定义目标，先切回闲逛
+        self.target = targets[direction]
+        self.rest_until = 0
+
     def _exec_action(self, body):
-        """插件发来的动作指令（模型通过【动作】标签触发）"""
+        """插件发来的动作指令（模型通过【动作】标签或关键词触发）"""
         action = body.get("action", "")
         try:
             if action == "jump":
@@ -916,6 +931,8 @@ class PetWindow(QWidget):
                 if mode in ("wander", "follow", "still"):
                     self.set_mode(mode)
                     self._report_event("mode", mode)
+            elif action == "direction":
+                self._set_direction_target(body.get("value", ""))
             else:
                 return False
             return True
@@ -923,14 +940,11 @@ class PetWindow(QWidget):
             return False
 
     def _on_single_click(self):
-        """单击：蹦跳 + 弹聊天面板（台词已屏蔽，反馈交给模型）"""
+        """单击：蹦跳 + 上报事件（功能面板已禁用，输入走 QQ）"""
         if random.random() < 0.7:
             self.jump_t = 1.0
         self._wake_from_still()
         self._report_event("click")
-        panel = self.function_panel
-        panel.popup_at(self.x() + self.width() / 2 - panel.width() / 2,
-                       self.y() - panel.height() - 10)
 
     def on_food(self, food):
         self.food_panel.hide()
@@ -941,10 +955,8 @@ class PetWindow(QWidget):
         self._report_event("feed", food)
 
     def _show_chat_dialog(self):
-        self.chat_dialog.popup_at(
-            self.x() + self.width() / 2,
-            self.y() + BUBBLE_H
-        )
+        """暂时禁用（输入走 QQ）"""
+        pass
 
     """def _get_city_by_ip(self):
         try:

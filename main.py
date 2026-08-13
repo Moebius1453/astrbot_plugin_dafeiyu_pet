@@ -49,6 +49,11 @@ ACTION_MAP = {
     "跟鼠标": "mode", "跟随光标": "mode", "跟着光标": "mode", "跟我走": "mode",
     "待着": "mode", "不动": "mode", "原地": "mode", "原地不动": "mode",
     "别动": "mode", "站着": "mode", "停": "mode",
+    "向右": "direction", "往右": "direction", "右边": "direction", "向右走": "direction",
+    "向左": "direction", "往左": "direction", "左边": "direction", "向左走": "direction",
+    "向上": "direction", "往上": "direction", "上面": "direction", "向上走": "direction",
+    "向下": "direction", "往下": "direction", "下面": "direction", "向下走": "direction",
+    "左上角": "direction", "左下角": "direction", "右上角": "direction", "右下角": "direction",
 }
 ACTION_MODE_VALUE = {"散步": "wander", "自由活动": "wander", "走走": "wander",
                      "去散步": "wander",
@@ -58,6 +63,14 @@ ACTION_MODE_VALUE = {"散步": "wander", "自由活动": "wander", "走走": "wa
                      "待着": "still", "不动": "still", "原地": "still",
                      "原地不动": "still", "别动": "still", "站着": "still",
                      "停": "still"}
+ACTION_DIRECTION_VALUE = {
+    "向右": "right", "往右": "right", "右边": "right", "向右走": "right",
+    "向左": "left", "往左": "left", "左边": "left", "向左走": "left",
+    "向上": "up", "往上": "up", "上面": "up", "向上走": "up",
+    "向下": "down", "往下": "down", "下面": "down", "向下走": "down",
+    "左上角": "top_left", "左下角": "bottom_left",
+    "右上角": "top_right", "右下角": "bottom_right",
+}
 # 模型回复里的动作标签：【动作：跳跃】/【动作：散步】
 ACTION_TAG_RE = re.compile(r"【动作[:：]\s*([^】]+)】")
 
@@ -333,6 +346,11 @@ class DafeiyuPetPlugin(Star):
         if m:
             action = m.group(1).strip()
             logger.info(f"检测到动作标签: {action}")
+            # 从显示文本隐藏标签（QQ 和气泡都不显示）
+            for comp in result.chain:
+                if isinstance(comp, Plain) and comp.text:
+                    comp.text = ACTION_TAG_RE.sub("", comp.text).strip()
+            full = ACTION_TAG_RE.sub("", full).strip()
         else:
             # 兜底：模型没输出标签时，从用户消息推断动作
             action = self._infer_action(event.message_str or "")
@@ -360,6 +378,10 @@ class DafeiyuPetPlugin(Star):
         if action == "mode":
             value = ACTION_MODE_VALUE.get(action_text, "wander")
             await self._send_pet_action({"action": "mode", "value": value})
+        elif action == "direction":
+            value = ACTION_DIRECTION_VALUE.get(action_text, "")
+            if value:
+                await self._send_pet_action({"action": "direction", "value": value})
         else:
             await self._send_pet_action({"action": action})
 
