@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+# 桌宠本体基于 1190fasheqi/dafeiyu-pet 改造，原项目 MIT License
+# 来源: https://github.com/1190fasheqi/dafeiyu-pet
 """
-大肥鱼桌宠 —— 三视图透明桌宠 + DeepSeek AI 对话
+大肥鱼桌宠 —— 三视图透明桌宠 + AstrBot 对话
 左键单击：弹出功能列表（🗨️图标）→ 点击🗨️弹出聊天框
 聊天时只禁用移动，呼吸/摇摆/小动作正常
 """
