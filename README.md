@@ -1,7 +1,7 @@
 # astrbot_plugin_dafeiyu_pet
 
 **把 QQ 智能体接到 Windows 桌面桌宠上** —— 轻量化桌宠 功能简单 桌宠是身体，AstrBot 是大脑。聊天时桌宠同步冒气泡；戳它、喂它，模型都知道。
-
+源项目地址 https://github.com/1190fasheqi/dafeiyu-pet
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 
 ## 目录
