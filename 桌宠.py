@@ -66,7 +66,7 @@ MARGIN = 4
 SIZE_LEVELS = {"小": 0.55, "中": 0.7, "大": 0.9}
 SPEED = 380.0
 TICK = 20
-
+#屏蔽预设对话
 LINES = [
     "梁白开，更适合国人的大硬鲸模型",
     "五梁威力，变身！",
@@ -111,7 +111,7 @@ FOOD_LINES = {
 }
 FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
 
-MAX_BUBBLE_CHARS = 40   # 气泡单条文本上限（2 行内放得下）
+MAX_BUBBLE_CHARS = 40   # 气泡单条文本上限
 SENTENCE_ENDS = ("。", "！", "？", "…", "……", "～")
 
 
@@ -146,7 +146,7 @@ def load_json(path, default):
 
 
 class ChatDialog(QDialog):
-    """聊天对话框 - 缩小版，匹配你的样式"""
+    """聊天对话框 - 缩小版，匹配气泡样式"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
