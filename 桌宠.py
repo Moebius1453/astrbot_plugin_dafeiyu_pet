@@ -36,7 +36,7 @@ try:
 except:
     GPU_AVAILABLE = False
 
-import requests
+import httpx
 from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRect, QRectF
 from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QIcon, QFontMetrics,
                            QPolygonF)
@@ -61,7 +61,8 @@ else:
     BUNDLE_DIR = APP_DIR
     PYTHONW = os.path.join(APP_DIR, ".venv", "Scripts", "pythonw.exe")
 SPRITE_DIR = os.path.join(BUNDLE_DIR, "sprites")
-CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+# 配置存 AstrBot data 目录（插件启动时注入），手动运行退回插件目录
+CONFIG_PATH = os.path.join(os.environ.get("ASTRBOT_DATA_DIR") or APP_DIR, "config.json")
 
 BUBBLE_H = 56
 MARGIN = 4
@@ -785,7 +786,7 @@ class PetWindow(QWidget):
         """互动/动作事件上报插件（身体状态注入用），失败不打扰"""
         def worker():
             try:
-                requests.post(
+                httpx.post(
                     f"{PLUGIN_API}/pet/event",
                     json={"type": event_type, "detail": detail},
                     timeout=5,
@@ -976,7 +977,7 @@ class PetWindow(QWidget):
 
             url = f"https://wttr.in/{city}?format=j1"
 
-            r = requests.get(
+            r = httpx.get(
                 url,
                 timeout=10,
                 headers={

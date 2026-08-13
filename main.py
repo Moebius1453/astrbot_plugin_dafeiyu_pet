@@ -20,6 +20,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.platform_adapter_type import PlatformAdapterType
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PET_HOST = "127.0.0.1"
 PET_PORT = 18789          # 桌宠的 HTTP 监听（插件 → 桌宠）
@@ -405,6 +406,7 @@ class DafeiyuPetPlugin(Star):
                 cwd=PET_DIR,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env={**os.environ, "ASTRBOT_DATA_DIR": get_astrbot_data_path()},
             )
             logger.info(f"桌宠进程已启动 (pid={self._pet_proc.pid})")
             return True
