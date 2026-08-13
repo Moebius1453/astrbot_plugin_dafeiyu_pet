@@ -12,6 +12,7 @@ import json
 import math
 import os
 import random
+import socket
 import subprocess
 import sys
 import threading
@@ -1127,11 +1128,28 @@ def start_pet_http_server(pet):
     print(f"桌宠 HTTP 监听已启动: 127.0.0.1:{PET_LISTEN_PORT}")
 
 
+def start_pet_heartbeat(pet):
+    """AstrBot/插件失联（连续 30 秒探测不到 18790）→ 桌宠自动退出"""
+    fail = 0
+    while True:
+        time.sleep(10)
+        try:
+            with socket.create_connection(("127.0.0.1", 18790), timeout=2):
+                fail = 0
+        except OSError:
+            fail += 1
+            if fail >= 3:
+                print("AstrBot 失联，桌宠自动退出")
+                QTimer.singleShot(0, pet.quit_app)
+                return
+
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     w = PetWindow()
     start_pet_http_server(w)
+    threading.Thread(target=start_pet_heartbeat, args=(w,), daemon=True).start()
     sys.exit(app.exec())
 
 
