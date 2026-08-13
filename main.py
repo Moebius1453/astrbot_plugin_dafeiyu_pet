@@ -229,24 +229,29 @@ class DafeiyuPetPlugin(Star):
         logger.info(f"主动回应已触发: {desc}")
 
     async def _idle_proactive_loop(self) -> None:
-        """安静期主动说话：360 秒周期，距最后用户输入 > 30 秒时 5% 概率"""
+        """安静期主动说话：360 秒一个周期，周期内循环判断，
+        用户输入打断（重置周期），触发一次后等下一周期"""
         while True:
             await asyncio.sleep(IDLE_CYCLE)
-            try:
-                now = time.time()
-                if now - self._last_user_input < IDLE_MIN_SILENCE:
-                    continue
-                if now - getattr(self, "_last_active_reply", 0) < IDLE_MIN_SILENCE:
-                    continue
-                if random.random() > IDLE_CHANCE:
-                    continue
-                await self._proactive_say(
-                    "现在是安静时段，作为桌宠主动跟主人说一句日常的话，保持人设，简短一点"
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"安静期主动说话失败: {e}")
+            # 周期内：每 30 秒检查一次，直到触发或被打断
+            while True:
+                try:
+                    now = time.time()
+                    if now - self._last_user_input < IDLE_MIN_SILENCE:
+                        break   # 用户有输入，重置周期
+                    if now - getattr(self, "_last_active_reply", 0) < IDLE_MIN_SILENCE:
+                        break   # 刚主动回应过
+                    if random.random() <= IDLE_CHANCE:
+                        await self._proactive_say(
+                            "现在是安静时段，作为桌宠主动跟主人说一句日常的话，保持人设，简短一点"
+                        )
+                        break   # 本周期已触发，等下一周期
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"安静期主动说话失败: {e}")
+                    await asyncio.sleep(30)
 
     async def _proactive_say(self, instruction: str) -> None:
         qq = self._resolve_qq()
