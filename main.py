@@ -1,16 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-大肥鱼桌宠插件 —— 桌宠是 QQ 智能体的身体
 
-链路:
-    桌宠输入框 → POST 插件本地端口 /pet/input → handle_msg 注入主人 QQ 会话
-        → AstrBot 完整管线（人格/记忆/历史）→ 回复 → QQ + 桌宠气泡同步
-    桌宠互动（点击/喂食/拖拽/动作）→ POST /pet/event → 存内存
-        → on_llm_request 作为身体状态注入每次对话
-    模型回复带【动作：X】→ on_decorating_result 解析 → POST 桌宠 /action 执行
-
-    插件自己监听 127.0.0.1:18790（loopback，无鉴权），桌宠不再需要 API Key。
-"""
 import asyncio
 import json
 import os

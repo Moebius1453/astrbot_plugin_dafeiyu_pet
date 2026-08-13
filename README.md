@@ -1,14 +1,70 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_dafeiyu_pet
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+**把 QQ 智能体接到 Windows 桌面桌宠上** —— 轻量化桌宠 功能简单 桌宠是身体，AstrBot 是大脑。聊天时桌宠同步冒气泡；戳它、喂它，模型都知道。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
 
-# Supports
+## 目录
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+- [特性](#特性)
+- [快速开始](#快速开始)
+- [玩法示例](#玩法示例)
+- [命令一览](#命令一览)
+- [常见问题](#常见问题)
+- [许可](#许可)
+
+## 特性
+
+一只住在你 Windows 桌面上的大肥鱼桌宠，大脑是 AstrBot：
+
+- **QQ 对话同步**：机器人的回复同时出现在桌宠气泡里，QQ 和桌面共用一个大脑、一段记忆
+- **互动感知**：戳、拖、喂食都会上报给模型，它可能主动回你一句（互动后 30 秒内大概率回应，安静时偶尔自言自语）
+- **说话控制**：QQ 里说"跳一下""伸个懒腰"，桌宠真的会做
+- **八方向移动**：向左/向右/向上/向下/四个角，说走就走
+- **跟随模式**："跟着我的鼠标"——鱼会追着鼠标跑
+- **进程托管**：插件负责启动/停止桌宠，AstrBot 退出时桌宠自动跟着退
+- **天气查询**：右键菜单「查看天气」，播报当前城市天气（城市在 config.json 的 `city` 字段改）
+- **系统监控**：CPU / 内存 / 显卡温度异常时气泡提醒
+
+## 快速开始
+
+前提：已部署 AstrBot
+
+1. **安装插件**：把 `astrbot_plugin_dafeiyu_pet` 文件夹放进 AstrBot 的 `data/plugins/` 目录，重启 AstrBot（或面板重载插件）。
+2. **启动桌宠**：QQ 给机器人发 `/pet start`，桌宠窗口出现。
+3. **开始玩**：在 QQ 里跟它聊天，或者直接对它说命令（见下）。
+
+> 插件配置里有 `master_qq`（主人 QQ 号），不填也能用——先在 QQ 里跟机器人说句话，插件会自动记住你的 QQ。
+
+## 玩法示例
+
+| 输入（近似即可） | 桌宠反应 |
+| --- | --- |
+| 跟着我的鼠标 | 切到跟随模式，追着鼠标跑 |
+| 去右上角 / 向右 / 往上 | 走到对应位置（八个方向 + 四个角） |
+| 跳一下 / 伸个懒腰 / 摇一摇 | 做对应动作 |
+| 待着 / 别动 / 散步 | 切换移动模式 |
+| 戳一下桌宠 / 喂它吃的 | 上报给模型，可能主动回你一句 |
+| （右键菜单）查看天气 | 播报当前城市天气 |
+| （普通聊天） | 回复同步到桌宠气泡 |
+
+## 命令一览
+
+| 命令 | 作用 |
+| --- | --- |
+| `/pet start` | 启动桌宠 |
+| `/pet stop` | 停止桌宠 |
+| `/pet status` | 查看桌宠状态 |
+| `/say <文本>` | 让桌宠说这句话（但是默认会输出气泡） |
+
+## 常见问题
+
+- **桌宠没反应**：确认插件已启用（面板插件页无红字）；`/pet status` 看状态；桌宠未启动先 `/pet start`。
+- **互动了模型不知道**：互动事件 5 分钟内会作为身体状态注入对话，超过后自然遗忘；主动回应有概率和冷却，不是每次互动都会回。
+- **动作不执行**：动作由你的话里的关键词触发（不依赖模型输出格式），确认说的是命令表里的词。
+- **桌宠自己退出了**：AstrBot 关闭后桌宠会跟着退（心跳机制，30 秒内），这是设计行为。
+- **QQ 回复带奇怪标签**：模型偶尔漏输出【动作】标签，正常情况下会被自动隐藏。
+
+## 许可
+
+插件本体 AGPL-3.0。桌宠本体（`桌宠.py`、`sprites/`）基于 [1190fasheqi/dafeiyu-pet](https://github.com/1190fasheqi/dafeiyu-pet)（MIT License）改造，感谢原作者开源。
