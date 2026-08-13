@@ -1,7 +1,7 @@
 name: astrbot_plugin_dafeiyu_pet
 display_name: deepseek大肥鱼桌宠
 short_desc: 轻量化桌宠
-desc: 轻量化桌宠插件 功能简单 让你的智能体附身大肥鱼
+desc: 轻量化桌宠插件 功能简单 让你的智能体附身大肥鱼 （基于1190fasheqi大佬的项目二次修改）
 version: v1.0
 author: Moebius1453
 repo: https://github.com/Moebius1453/astrbot_plugin_dafeiyu_pet
