@@ -1,0 +1,8 @@
+{
+    "master_qq": {
+        "description": "主人 QQ 号",
+        "hint": "你的 QQ 号。桌宠输入会注入到这个 QQ 的私聊会话里，与 QQ 对话共用同一人格和记忆。",
+        "type": "string",
+        "default": ""
+    }
+}

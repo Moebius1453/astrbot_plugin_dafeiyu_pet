@@ -44,11 +44,10 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,
 
 
 
-# ===== AstrBot 配置 =====
-# 桌宠对话走 AstrBot open API（webchat 会话，人格/历史全在 AstrBot 侧）
-ASTRBOT_API = "http://127.0.0.1:6185/api/v1"
-PET_SESSION_ID = "dafeiyu_pet"
-# 桌宠自己的 HTTP 监听端口（插件从这里把话送进来）
+# ===== AstrBot 插件桥配置 =====
+# 输入/事件走插件本地端口（插件内部注入 QQ 会话，无需 API Key）
+PLUGIN_API = "http://127.0.0.1:18790"
+# 桌宠自己的 HTTP 监听端口（插件从这里把话和动作送进来）
 PET_LISTEN_PORT = 18789
 
 if getattr(sys, "frozen", False):
@@ -111,6 +110,20 @@ FOOD_LINES = {
     "💎": ["钻石？！这能吃吗……咕咚。真香！", "发财啦！明天开始吃高级鱼粮！"],
 }
 FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
+
+MAX_BUBBLE_CHARS = 40   # 气泡单条文本上限（2 行内放得下）
+SENTENCE_ENDS = ("。", "！", "？", "…", "……", "～")
+
+
+def cut_sentence(text, limit=MAX_BUBBLE_CHARS):
+    """句号断句：limit 内找最后一个句号断句，找不到才硬截加省略号"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    idx = max((cut.rfind(e) for e in SENTENCE_ENDS), default=-1)
+    if idx >= limit // 2:
+        return cut[: idx + 1]
+    return cut + "…"
 
 
 def load_json(path, default):
@@ -338,6 +351,112 @@ class FoodPanel(QWidget):
         self.show()
         self.raise_()
 
+class BubbleWindow(QWidget):
+    """独立气泡窗：显示在桌宠旁，智能选位避免超出屏幕，最多 2 行"""
+
+    MAX_W = 240
+    PAD_X = 10
+    PAD_TOP = 7
+    PAD_BOTTOM = 7
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._text = ""
+        self._inner = False
+        self._lines = []
+        self._font = QFont("Microsoft YaHei UI", 11)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide)
+
+    def show_bubble(self, text, inner=False, duration_ms=2800, anchor=None):
+        self._text = text
+        self._inner = inner
+        self._lines = self._wrap_lines(text)
+        self._position(anchor)
+        self.show()
+        self.raise_()
+        self._hide_timer.start(duration_ms)
+
+    def _wrap_lines(self, text):
+        """按宽度折行，最多 2 行，第 2 行超出加省略号"""
+        fm = QFontMetrics(self._font)
+        max_w = self.MAX_W - 20
+        lines = []
+        cur = ""
+        for ch in text:
+            if fm.horizontalAdvance(cur + ch) > max_w:
+                lines.append(cur)
+                cur = ch
+                if len(lines) == 2:
+                    break
+            else:
+                cur += ch
+        if len(lines) == 2:
+            second = cur
+            while second and fm.horizontalAdvance(second + "…") > max_w:
+                second = second[:-1]
+            lines[1] = second + "…"
+            return lines
+        lines.append(cur)
+        return lines
+
+    def _bubble_size(self):
+        fm = QFontMetrics(self._font)
+        bw = max(fm.horizontalAdvance(l) for l in self._lines) + self.PAD_X * 2
+        bh = len(self._lines) * fm.height() + self.PAD_TOP + self.PAD_BOTTOM
+        return bw, bh
+
+    def _position(self, anchor):
+        """智能选位：头顶 → 左 → 右 → 下方，全程 clamp 在屏幕内"""
+        bw, bh = self._bubble_size()
+        self.setFixedSize(bw, bh)
+        screen = QApplication.primaryScreen().availableGeometry()
+        if anchor is None:
+            anchor = QRect(screen.center().x() - 100, screen.center().y() - 100, 200, 100)
+        gap = 8
+        # 头顶
+        x = anchor.center().x() - bw // 2
+        y = anchor.top() - bh - gap
+        if y < screen.top() + 2:
+            # 左右
+            x = anchor.left() - bw - gap
+            y = anchor.center().y() - bh // 2
+            if x < screen.left() + 2:
+                x = anchor.right() + gap
+            if x + bw > screen.right() - 2:
+                x = anchor.center().x() - bw // 2
+                y = anchor.bottom() + gap
+        x = max(screen.left() + 2, min(x, screen.right() - bw - 2))
+        y = max(screen.top() + 2, min(y, screen.bottom() - bh - 2))
+        self.move(x, y)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fm = QFontMetrics(self._font)
+        bw, bh = self._bubble_size()
+        if self._inner:
+            bfont = QFont(self._font)
+            bfont.setItalic(True)
+            bg, fg = QColor(232, 232, 238, 235), QColor(125, 125, 138)
+        else:
+            bfont = QFont(self._font)
+            bg, fg = QColor(255, 255, 255, 235), QColor(60, 60, 80)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(QRectF(0, 0, bw, bh), 10, 10)
+        tail = QPointF(bw / 2, bh)
+        p.drawPolygon(QPolygonF([tail, QPointF(tail.x() - 6, tail.y() + 8),
+                                 QPointF(tail.x() + 6, tail.y() + 8)]))
+        p.setPen(fg)
+        p.setFont(bfont)
+        for i, l in enumerate(self._lines):
+            p.drawText(QRectF(self.PAD_X, self.PAD_TOP + i * fm.height(), bw - self.PAD_X * 2, fm.height()),
+                       Qt.AlignmentFlag.AlignCenter, l)
+
 class PetWindow(QWidget):
     def _set_city_dialog(self):
         city, ok = QInputDialog.getText(
@@ -364,7 +483,6 @@ class PetWindow(QWidget):
             "autostart": False,
             "x": None,
             "y": None,
-            "astrbot_api_key": "",
             "city": "汕头"
     })
         
@@ -437,6 +555,9 @@ class PetWindow(QWidget):
         
         # 聊天对话框
         self.chat_dialog = ChatDialog(self)
+
+        # 独立气泡窗（智能选位，不遮挡立绘）
+        self.bubble_window = BubbleWindow()
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -463,68 +584,16 @@ class PetWindow(QWidget):
 
     # ---------- AI 方法 ----------
     def _call_ds(self, user_msg):
-        """对话走 AstrBot open API：POST /api/v1/chat，SSE 流式等 complete 帧"""
-        if self.ds_busy:
-            self.say("等等，上一句还没回完呢")
-            return
-
-        key = self.cfg.get("astrbot_api_key", "")
-        if not key:
-            self.say("请先在右键菜单里设置 AstrBot API Key！")
-            return
-
-        self.ds_busy = True
-
+        """对话走插件：注入主人 QQ 会话，回复由插件同步回气泡"""
         def worker():
             try:
-                resp = requests.post(
-                    f"{ASTRBOT_API}/chat",
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-API-Key": key,
-                    },
-                    json={
-                        "message": user_msg,
-                        "session_id": PET_SESSION_ID,
-                        "username": PET_SESSION_ID,
-                    },
-                    timeout=60,
-                    stream=True,
+                requests.post(
+                    f"{PLUGIN_API}/pet/input",
+                    json={"text": user_msg},
+                    timeout=5,
                 )
-                if resp.status_code != 200:
-                    self._queue_say(f"AstrBot 错误: {resp.status_code}")
-                    return
-                # 解析 SSE 流：complete 帧带全文，end 帧结束
-                reply = ""
-                for raw_line in resp.iter_lines():
-                    if not raw_line:
-                        continue
-                    line = raw_line.decode("utf-8", "ignore")
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        frame = json.loads(line[5:].strip())
-                    except Exception:
-                        continue
-                    if frame.get("type") == "complete":
-                        reply = frame.get("data") or ""
-                        break
-                    if frame.get("type") == "end":
-                        break
-                reply = reply.strip()
-                if reply:
-                    if len(reply) > 30:
-                        reply = reply[:28] + "…"
-                    self._queue_say(reply)
-            except requests.exceptions.Timeout:
-                self._queue_say("请求超时，AstrBot 没回应")
-            except requests.exceptions.ConnectionError:
-                self._queue_say("连不上 AstrBot，检查它是否在运行")
-            except Exception as e:
-                self._queue_say(f"请求失败: {str(e)[:12]}")
-            finally:
-                self.ds_busy = False
-
+            except Exception:
+                self.say("连不上 AstrBot，检查它是否在运行")
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 绘制 ----------
@@ -533,41 +602,6 @@ class PetWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = self.t * TICK / 1000.0
-
-        if self.bubble_text and now < self.bubble_until:
-            if self.bubble_inner:
-                bfont = QFont(self.bubble_font)
-                bfont.setItalic(True)
-                bg, fg = QColor(232, 232, 238, 235), QColor(125, 125, 138)
-            else:
-                bfont = QFont(self.bubble_font)
-                bg, fg = QColor(255, 255, 255, 235), QColor(60, 60, 80)
-            fm = QFontMetrics(bfont)
-            max_w = min(240, self.width() - 16)
-            words = self.bubble_text
-            lines = []
-            cur = ""
-            for ch in words:
-                if fm.horizontalAdvance(cur + ch) > max_w - 20:
-                    lines.append(cur)
-                    cur = ch
-                else:
-                    cur += ch
-            lines.append(cur)
-            bw = max(fm.horizontalAdvance(l) for l in lines) + 20
-            bh = len(lines) * fm.height() + 14
-            bx = (self.width() - bw) / 2
-            by = 6.0
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(bg)
-            p.drawRoundedRect(QRectF(bx, by, bw, bh), 10, 10)
-            tail = QPointF(self.width() / 2, by + bh)
-            p.drawPolygon(QPolygonF([tail, QPointF(tail.x() - 6, tail.y() + 8), QPointF(tail.x() + 6, tail.y() + 8)]))
-            p.setPen(fg)
-            p.setFont(bfont)
-            for i, l in enumerate(lines):
-                p.drawText(QRectF(bx, by + 7 + i * fm.height(), bw, fm.height()),
-                           Qt.AlignmentFlag.AlignCenter, l)
 
         cx = self.width() / 2
         walking = self.target is not None and not self.dragging
@@ -711,24 +745,41 @@ class PetWindow(QWidget):
             pick = random.random()
             if pick < 0.35:
                 self.jump_t = 1.0
+                self._report_event("jump")
             elif pick < 0.6:
                 self.action, self.action_t = "sway", 1.0
+                self._report_event("sway")
             elif pick < 0.8:
                 self.action, self.action_t = "stretch", 1.0
+                self._report_event("stretch")
             # 原 0.8~0.9 的随机台词分支已屏蔽（说话权归 AstrBot）
 
     def _queue_say(self, text):
         """后台线程调用：只入队，由主线程 tick 统一弹出显示（线程安全）"""
         self._say_queue.append(text)
 
+    def _report_event(self, event_type, detail=""):
+        """互动/动作事件上报插件（身体状态注入用），失败不打扰"""
+        def worker():
+            try:
+                requests.post(
+                    f"{PLUGIN_API}/pet/event",
+                    json={"type": event_type, "detail": detail},
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
     def say(self, text, inner=False):
         if text == self.last_line and not text.startswith("天气"):
             return
         self.last_line = text
-        self.bubble_inner = inner
-        self.bubble_text = f"（{text}）" if inner else text
-        self.bubble_until = self.t * TICK / 1000.0 + 2.8
-        self.update()
+        self.bubble_window.show_bubble(
+            cut_sentence(text),
+            inner=inner,
+            anchor=QRect(self.x(), self.y(), self.width(), self.height()),
+        )
 
     def check_system_status(self):
             now = self.t * TICK
@@ -797,8 +848,8 @@ class PetWindow(QWidget):
                 self._set_dir("down", 1)
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(6000, 14000)
-                if random.random() < 0.5:
-                    self.say(random.choice(DRAG_LINES))
+                # 拖拽台词已屏蔽（反馈交给模型），事件照常上报
+                self._report_event("drag")
                 self.chat_paused = False
             else:
                 self._click_timer.start(280)  # 等双击判定；单击则回嘴+弹聊天面板
@@ -810,12 +861,32 @@ class PetWindow(QWidget):
             self._click_timer.stop()
             self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
 
+    def _exec_action(self, body):
+        """插件发来的动作指令（模型通过【动作】标签触发）"""
+        action = body.get("action", "")
+        try:
+            if action == "jump":
+                self.jump_t = 1.0
+            elif action == "sway":
+                self.action, self.action_t = "sway", 1.0
+            elif action == "stretch":
+                self.action, self.action_t = "stretch", 1.0
+            elif action == "mode":
+                mode = body.get("value", "wander")
+                if mode in ("wander", "follow", "still"):
+                    self.set_mode(mode)
+                    self._report_event("mode", mode)
+            else:
+                return False
+            return True
+        except Exception:
+            return False
+
     def _on_single_click(self):
-        """单击：蹦跳回嘴 + 弹聊天面板，同时把事件上报 AstrBot"""
+        """单击：蹦跳 + 弹聊天面板（台词已屏蔽，反馈交给模型）"""
         if random.random() < 0.7:
             self.jump_t = 1.0
-        if random.random() < 0.6:
-            self.say(random.choice(REACT_LINES))
+        self._report_event("click")
         panel = self.function_panel
         panel.popup_at(self.x() + self.width() / 2 - panel.width() / 2,
                        self.y() - panel.height() - 10)
@@ -824,8 +895,8 @@ class PetWindow(QWidget):
         self.food_panel.hide()
         self.eat_t = 1.0
         self.jump_t = 0.6
-        lines = FOOD_LINES.get(food, ["好吃！"])
-        self.say(random.choice(lines))
+        # 喂食台词已屏蔽（反馈交给模型），事件照常上报
+        self._report_event("feed", food)
 
     def _show_chat_dialog(self):
         self.chat_dialog.popup_at(
@@ -903,7 +974,6 @@ class PetWindow(QWidget):
             a.setCheckable(True)
             a.setChecked(abs(self.cur_h - 340 * mult) < 2)
             a.triggered.connect(lambda _, v=mult: self.set_size(v))
-        m.addAction("设置 API Key", self._set_key_dialog)
         m.addAction("查看天气", self._get_weather)
         m.addSeparator()
         m.addAction("显示/隐藏", self.toggle_visible)
@@ -923,20 +993,6 @@ class PetWindow(QWidget):
         m.addSeparator()
         m.addAction("退出", self.quit_app)
         return m
-
-    def _set_key_dialog(self):
-        key, ok = QInputDialog.getText(
-            self,
-            "设置 AstrBot API Key",
-            "输入 AstrBot 面板的 API Key（设置→API Key 管理，需 chat 权限）:",
-            QLineEdit.EchoMode.Normal,
-            self.cfg.get("astrbot_api_key", "")
-        )
-        if ok and key.strip():
-            self.cfg["astrbot_api_key"] = key.strip()
-            self.say("Key 设置成功！")
-        elif ok and not key.strip():
-            self.say("Key 不能为空")
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Context:
@@ -1034,13 +1090,18 @@ def start_pet_http_server(pet):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
-                text = body.get("text", "")
-                if text:
-                    pet._queue_say(text)
+                path = self.path.split("?", 1)[0]
+                if path.startswith("/action"):
+                    result = {"ok": pet._exec_action(body)}
+                else:
+                    text = body.get("text", "")
+                    if text:
+                        pet._queue_say(text)  # 截断/断句由 say() 统一处理
+                    result = {"ok": True}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"ok": True}).encode("utf-8"))
+                self.wfile.write(json.dumps(result).encode("utf-8"))
             except Exception as e:
                 print("HTTP 处理失败:", e)
                 self.send_response(500)
