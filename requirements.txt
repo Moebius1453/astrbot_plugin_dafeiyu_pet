@@ -1,0 +1,7 @@
+# 插件桥
+httpx
+
+# 桌宠本体（pet/桌宠.py）依赖
+PySide6
+psutil
+requests

@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 本地配置（含 API Key，不入仓库）
+config.json
