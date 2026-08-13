@@ -14,6 +14,7 @@
 import asyncio
 import json
 import os
+import random
 import re
 import socket
 import subprocess
@@ -53,11 +54,15 @@ ACTION_MODE_VALUE = {"散步": "wander", "自由活动": "wander", "走走": "wa
 # 模型回复里的动作标签：【动作：跳跃】/【动作：散步】
 ACTION_TAG_RE = re.compile(r"【动作[:：]\s*([^】]+)】")
 
-# 主动回应的冷却时间（秒）：互动后多久内只主动回应一次
+# 主动回应规则：用户互动后 30 秒内 75% 概率最多一次；安静期 360 秒周期 5% 概率
 ACTIVE_REPLY_COOLDOWN = 30
+ACTIVE_REPLY_CHANCE = 0.75
+IDLE_CYCLE = 360
+IDLE_CHANCE = 0.05
+IDLE_MIN_SILENCE = 30
 
 # 身体状态注入的提示词（注入到每次对话的 system_prompt）
-BODY_STATE_PREFIX = "\n\n【身体状态】你是桌面上的一只大肥鱼桌宠："
+BODY_STATE_PREFIX = "\n\n【身体状态】你在桌面上你可以移动跳跃："
 
 
 def pet_alive() -> bool:
@@ -68,7 +73,7 @@ def pet_alive() -> bool:
         return False
 
 
-@register("dafeiyu_pet", "Moebius", "大肥鱼桌宠：桌宠是 QQ 智能体的身体", "0.4.0")
+@register("dafeiyu_pet", "Moebius", "桌宠是 QQ 智能体的身体", "0.4.0")
 class DafeiyuPetPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -80,12 +85,21 @@ class DafeiyuPetPlugin(Star):
         self._pet_events: list[dict] = []   # 最近互动事件（身体状态注入用）
         self._event_ts: dict[str, float] = {}  # 同类事件去重
         self._last_mode = "wander"
+        self._observed_qq = ""   # 最近对话的 QQ 发送者（master_qq 未配置时的兜底）
+        self._last_user_input = 0.0   # 最后用户输入时间（安静期判断用）
+        self._idle_task: asyncio.Task | None = None
+
+    def _resolve_qq(self) -> str:
+        """注入目标 QQ：优先配置的 master_qq，否则用最近对话的发送者"""
+        qq = str(self.config.get("master_qq") or "").strip()
+        return qq or self._observed_qq
 
     async def initialize(self):
         self._http = httpx.AsyncClient(timeout=10)
         self._loop = asyncio.get_running_loop()
         self._start_listener()
-        logger.info("大肥鱼插件已激活，监听 127.0.0.1:%d", LISTEN_PORT)
+        self._idle_task = asyncio.create_task(self._idle_proactive_loop())
+        logger.info("插件已激活，监听 127.0.0.1:%d", LISTEN_PORT)
 
     # ---------- 本地 HTTP 监听（桌宠 → 插件） ----------
 
@@ -126,9 +140,9 @@ class DafeiyuPetPlugin(Star):
         text = str(body.get("text") or "").strip()
         if not text:
             return {"ok": False, "error": "empty text"}
-        qq = str(self.config.get("master_qq") or "").strip()
+        qq = self._resolve_qq()
         if not qq:
-            return {"ok": False, "error": "master_qq 未配置（插件配置里填主人 QQ 号）"}
+            return {"ok": False, "error": "无法确定主人 QQ（先在 QQ 里跟机器人说句话，或在插件配置填 master_qq）"}
         platform = self.context.get_platform(PlatformAdapterType.AIOCQHTTP)
         if platform is None:
             return {"ok": False, "error": "aiocqhttp 平台未启用"}
@@ -136,7 +150,7 @@ class DafeiyuPetPlugin(Star):
         msg.type = MessageType.FRIEND_MESSAGE
         msg.self_id = qq
         msg.session_id = qq
-        msg.message_id = f"pet_{int(time.time() * 1000)}"
+        msg.message_id = f"pet_user_{int(time.time() * 1000)}"
         msg.sender = MessageMember(qq, "主人")
         msg.message = [Plain(text)]
         msg.message_str = text
@@ -161,8 +175,8 @@ class DafeiyuPetPlugin(Star):
         self._pet_events.append({"type": etype, "detail": detail, "at": now})
         self._pet_events = self._pet_events[-5:]
         logger.info(f"桌宠事件已收集: {etype}/{detail}，当前 {len(self._pet_events)} 条")
-        # 主动回应：互动事件触发模型回应（30 秒冷却）
-        if etype in ("click", "feed", "drag", "sway", "jump", "stretch"):
+        # 主动回应：仅用户真实互动触发（自动动作 jump/sway/stretch 不触发）
+        if etype in ("click", "feed", "drag"):
             await self._maybe_active_reply(etype, detail)
         return {"ok": True}
 
@@ -184,22 +198,28 @@ class DafeiyuPetPlugin(Star):
         return ""
 
     async def _maybe_active_reply(self, etype: str, detail: str) -> None:
-        """互动后主动让模型回应一次（30 秒冷却），回应走管线进历史"""
+        """用户互动后 30 秒内，75% 概率最多主动回应一次"""
         now = time.time()
         if now - getattr(self, "_last_active_reply", 0) < ACTIVE_REPLY_COOLDOWN:
+            return
+        if random.random() > ACTIVE_REPLY_CHANCE:
             return
         desc = self._event_desc(etype, detail)
         if not desc:
             return
-        qq = str(self.config.get("master_qq") or "").strip()
+        qq = self._resolve_qq()
         platform = self.context.get_platform(PlatformAdapterType.AIOCQHTTP)
-        if not qq or platform is None:
+        if not qq:
+            logger.warning("主动回应跳过：无法确定主人 QQ")
+            return
+        if platform is None:
+            logger.warning("主动回应跳过：aiocqhttp 平台未启用")
             return
         msg = AstrBotMessage()
         msg.type = MessageType.FRIEND_MESSAGE
         msg.self_id = qq
         msg.session_id = qq
-        msg.message_id = f"pet_active_{int(time.time() * 1000)}"
+        msg.message_id = f"pet_auto_{int(time.time() * 1000)}"
         msg.sender = MessageMember(qq, "主人")
         msg.message = [Plain(f"{desc}，作为桌宠用一句话回应，保持人设")]
         msg.message_str = f"{desc}，作为桌宠用一句话回应，保持人设"
@@ -207,6 +227,44 @@ class DafeiyuPetPlugin(Star):
         self._last_active_reply = now
         await platform.handle_msg(msg)
         logger.info(f"主动回应已触发: {desc}")
+
+    async def _idle_proactive_loop(self) -> None:
+        """安静期主动说话：360 秒周期，距最后用户输入 > 30 秒时 5% 概率"""
+        while True:
+            await asyncio.sleep(IDLE_CYCLE)
+            try:
+                now = time.time()
+                if now - self._last_user_input < IDLE_MIN_SILENCE:
+                    continue
+                if now - getattr(self, "_last_active_reply", 0) < IDLE_MIN_SILENCE:
+                    continue
+                if random.random() > IDLE_CHANCE:
+                    continue
+                await self._proactive_say(
+                    "现在是安静时段，作为桌宠主动跟主人说一句日常的话，保持人设，简短一点"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"安静期主动说话失败: {e}")
+
+    async def _proactive_say(self, instruction: str) -> None:
+        qq = self._resolve_qq()
+        platform = self.context.get_platform(PlatformAdapterType.AIOCQHTTP)
+        if not qq or platform is None:
+            return
+        msg = AstrBotMessage()
+        msg.type = MessageType.FRIEND_MESSAGE
+        msg.self_id = qq
+        msg.session_id = qq
+        msg.message_id = f"pet_auto_{int(time.time() * 1000)}"
+        msg.sender = MessageMember(qq, "主人")
+        msg.message = [Plain(instruction)]
+        msg.message_str = instruction
+        msg.raw_message = None
+        self._last_active_reply = time.time()
+        await platform.handle_msg(msg)
+        logger.info("安静期主动说话已触发")
 
     # ---------- 身体状态注入 ----------
 
@@ -224,15 +282,22 @@ class DafeiyuPetPlugin(Star):
     @filter.on_llm_request(priority=-10)
     async def inject_body_state(self, event: AstrMessageEvent, req):
         """每次对话前把桌宠身体状态注入提示词（priority 靠后，避免被后续组装覆盖）"""
+        # 记录最近对话的 QQ 发送者（master_qq 未配置时作为注入目标兜底）+ 用户输入时间
+        if event.get_platform_name() == "aiocqhttp":
+            sid = event.get_sender_id()
+            if sid:
+                self._observed_qq = str(sid)
+                mid = getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+                if not mid.startswith("pet_auto_"):   # 主动消息不算用户输入
+                    self._last_user_input = time.time()
         state = self._body_state_text()
         if state:
             req.system_prompt = (req.system_prompt or "") + BODY_STATE_PREFIX + state
-        # 动作标签说明：禁止括号描述动作、标签不显示、别乱切模式
+        # 动作标签说明：必须输出、会被隐藏、禁止括号描述
         req.prompt = (req.prompt or "") + (
-            "\n（如需让桌宠做动作，在回复末尾加【动作：跳跃/摇晃/伸懒腰/散步/跟随/待着】。"
-            "该标签只用于触发动作，不会显示给用户，不要写在正文里。"
-            "不要在回复里用括号描述动作，如不要写（摇了摇尾巴）。"
-            "除非用户明确要求，不要主动切换桌宠的移动模式。）"
+            "\n（如需让桌宠做动作，必须在回复末尾输出【动作：跳跃/摇晃/伸懒腰/散步/跟随/待着】标签。"
+            "该标签会被系统自动隐藏，不会显示给用户，所以不要省略它。"
+            "不要在回复正文里用括号描述动作，如不要写（摇了摇尾巴）。）"
         )
 
     # ---------- 回复处理：同步桌宠 + 动作执行 ----------
@@ -340,6 +405,8 @@ class DafeiyuPetPlugin(Star):
             yield event.plain_result(f"桌宠通信失败：{e}")
 
     async def terminate(self):
+        if self._idle_task:
+            self._idle_task.cancel()
         if self._server:
             self._server.shutdown()
             self._server.server_close()

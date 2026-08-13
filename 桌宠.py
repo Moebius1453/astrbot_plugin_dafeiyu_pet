@@ -15,6 +15,7 @@ import random
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 def load_config():
@@ -775,11 +776,21 @@ class PetWindow(QWidget):
         if text == self.last_line and not text.startswith("天气"):
             return
         self.last_line = text
-        self.bubble_window.show_bubble(
-            cut_sentence(text),
-            inner=inner,
-            anchor=QRect(self.x(), self.y(), self.width(), self.height()),
-        )
+        try:
+            self.bubble_window.show_bubble(
+                cut_sentence(text),
+                inner=inner,
+                anchor=QRect(self.x(), self.y(), self.width(), self.height()),
+            )
+        except Exception as e:
+            with open(os.path.join(APP_DIR, "bubble_error.log"), "a", encoding="utf-8") as f:
+                f.write(f"[{time.time()}] say 异常: {e!r}\n")
+
+    def _wake_from_still(self):
+        """互动信号：still 模式下切回闲逛（主人来互动了不装死）"""
+        if self.mode == "still":
+            self.set_mode("wander")
+            self._report_event("mode", "wander")
 
     def check_system_status(self):
             now = self.t * TICK
@@ -849,6 +860,7 @@ class PetWindow(QWidget):
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(6000, 14000)
                 # 拖拽台词已屏蔽（反馈交给模型），事件照常上报
+                self._wake_from_still()
                 self._report_event("drag")
                 self.chat_paused = False
             else:
@@ -886,6 +898,7 @@ class PetWindow(QWidget):
         """单击：蹦跳 + 弹聊天面板（台词已屏蔽，反馈交给模型）"""
         if random.random() < 0.7:
             self.jump_t = 1.0
+        self._wake_from_still()
         self._report_event("click")
         panel = self.function_panel
         panel.popup_at(self.x() + self.width() / 2 - panel.width() / 2,
@@ -896,6 +909,7 @@ class PetWindow(QWidget):
         self.eat_t = 1.0
         self.jump_t = 0.6
         # 喂食台词已屏蔽（反馈交给模型），事件照常上报
+        self._wake_from_still()
         self._report_event("feed", food)
 
     def _show_chat_dialog(self):
