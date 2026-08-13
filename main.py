@@ -305,34 +305,46 @@ class DafeiyuPetPlugin(Star):
         state = self._body_state_text()
         if state:
             req.system_prompt = (req.system_prompt or "") + BODY_STATE_PREFIX + state
-        # 动作标签说明：必须输出、会被隐藏、禁止括号描述
+        # 硬性格式规则放 system 侧（模型对 system 遵守度更高）
+        req.system_prompt = (req.system_prompt or "") + (
+            "\n【回复格式】每次回复的末尾都必须带【动作：X】标签，X 只能从以下选择一个："
+            "跳跃/摇晃/伸懒腰/散步/跟随/待着。不需要动作时就写【动作：待着】。"
+            "这个标签只用于控制桌宠动作，不会显示给用户，所以绝不要省略。"
+            "不要在回复正文里用括号描述动作，如不要写（摇了摇尾巴）。"
+        )
+        # 用户消息末尾再提醒一次（防长上下文稀释）
         req.prompt = (req.prompt or "") + (
-            "\n（如需让桌宠做动作，必须在回复末尾输出【动作：跳跃/摇晃/伸懒腰/散步/跟随/待着】标签。"
-            "该标签会被系统自动隐藏，不会显示给用户，所以不要省略它。"
-            "不要在回复正文里用括号描述动作，如不要写（摇了摇尾巴）。）"
+            "\n（记得在回复末尾输出【动作：X】标签，例如你要跳跃就写【动作：跳跃】）"
         )
 
     # ---------- 回复处理：同步桌宠 + 动作执行 ----------
 
     @filter.on_decorating_result()
     async def sync_to_pet(self, event: AstrMessageEvent):
-        """智能体回复 → 同步桌宠气泡 + 解析动作标签执行"""
+        """智能体回复 → 同步桌宠气泡 + 解析动作标签执行
+        【测试中】暂不屏蔽标签（保留显示），观察动作触发情况"""
         result = event.get_result()
         if result is None or not result.is_llm_result():
             return
         texts = [comp.text for comp in result.chain if isinstance(comp, Plain) and comp.text]
         full = " ".join(texts)
-        # 动作标签：先执行，再从所有显示文本里去掉（QQ 和气泡都不显示）
         action = None
         m = ACTION_TAG_RE.search(full)
         if m:
             action = m.group(1).strip()
-            for comp in result.chain:
-                if isinstance(comp, Plain) and comp.text:
-                    comp.text = ACTION_TAG_RE.sub("", comp.text).strip()
-            full = ACTION_TAG_RE.sub("", full).strip()
-        if action and pet_alive():
-            await self._execute_action(action)
+            logger.info(f"检测到动作标签: {action}")
+        else:
+            # 兜底：模型没输出标签时，从用户消息推断动作
+            action = self._infer_action(event.message_str or "")
+            if action:
+                logger.info(f"无标签，从用户消息推断动作: {action}")
+        if action:
+            if pet_alive():
+                await self._execute_action(action)
+            else:
+                logger.warning("动作未执行：桌宠不在线")
+        else:
+            logger.info(f"回复无动作标签: {full[:40]}")
         if full and pet_alive():
             try:
                 await self._http.post(f"{PET_URL}/say", json={"text": full})
@@ -342,12 +354,22 @@ class DafeiyuPetPlugin(Star):
     async def _execute_action(self, action_text: str):
         action = ACTION_MAP.get(action_text)
         if not action:
+            logger.warning(f"动作未识别: {action_text}")
             return
+        logger.info(f"执行动作: {action_text} -> {action}")
         if action == "mode":
             value = ACTION_MODE_VALUE.get(action_text, "wander")
             await self._send_pet_action({"action": "mode", "value": value})
         else:
             await self._send_pet_action({"action": action})
+
+    @staticmethod
+    def _infer_action(user_msg: str) -> str:
+        """模型没输出标签时，从用户消息推断动作关键词"""
+        for keyword in ACTION_MAP:
+            if keyword in user_msg:
+                return keyword
+        return ""
 
     async def _send_pet_action(self, payload: dict):
         try:

@@ -114,18 +114,26 @@ FOOD_LINES = {
 FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
 
 MAX_BUBBLE_CHARS = 40   # 气泡单条文本上限
+MAX_BUBBLE_SEGMENTS = 3  # 长文本最多分段数（每段依次显示）
 SENTENCE_ENDS = ("。", "！", "？", "…", "……", "～")
 
 
-def cut_sentence(text, limit=MAX_BUBBLE_CHARS):
-    """句号断句：limit 内找最后一个句号断句，找不到才硬截加省略号"""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    idx = max((cut.rfind(e) for e in SENTENCE_ENDS), default=-1)
-    if idx >= limit // 2:
-        return cut[: idx + 1]
-    return cut + "…"
+def split_segments(text, max_len=MAX_BUBBLE_CHARS, max_segments=MAX_BUBBLE_SEGMENTS):
+    """按句号把长文本切成多段（每段 ≤max_len），超出 max_segments 的部分丢弃"""
+    if len(text) <= max_len:
+        return [text]
+    segments = []
+    cur = ""
+    for ch in text:
+        cur += ch
+        if len(cur) >= max_len or ch in SENTENCE_ENDS:
+            segments.append(cur)
+            cur = ""
+            if len(segments) >= max_segments:
+                break
+    if cur and len(segments) < max_segments:
+        segments.append(cur)
+    return segments
 
 
 def load_json(path, default):
@@ -369,18 +377,37 @@ class BubbleWindow(QWidget):
         self._inner = False
         self._lines = []
         self._font = QFont("Microsoft YaHei UI", 11)
+        self._queue = []          # 待显示的文本段（分段连续说）
+        self._anchor = None
+        self._duration_ms = 2800
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self.hide)
+        self._hide_timer.timeout.connect(self._on_segment_done)
 
     def show_bubble(self, text, inner=False, duration_ms=2800, anchor=None):
+        """长文本按句号切段，一段一段依次显示"""
         self._text = text
         self._inner = inner
-        self._lines = self._wrap_lines(text)
-        self._position(anchor)
+        self._anchor = anchor
+        self._duration_ms = duration_ms
+        self._queue = split_segments(text)
+        self._show_next()
+
+    def _show_next(self):
+        if not self._queue:
+            self.hide()
+            return
+        seg = self._queue.pop(0)
+        self._lines = self._wrap_lines(seg)
+        self._position(self._anchor)
         self.show()
         self.raise_()
-        self._hide_timer.start(duration_ms)
+        self._hide_timer.start(self._duration_ms)
+
+    def _on_segment_done(self):
+        self.hide()
+        if self._queue:
+            self._show_next()
 
     def _wrap_lines(self, text):
         """按宽度折行，最多 2 行，第 2 行超出加省略号"""
@@ -779,7 +806,7 @@ class PetWindow(QWidget):
         self.last_line = text
         try:
             self.bubble_window.show_bubble(
-                cut_sentence(text),
+                text,
                 inner=inner,
                 anchor=QRect(self.x(), self.y(), self.width(), self.height()),
             )
