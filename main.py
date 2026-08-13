@@ -51,7 +51,10 @@ ACTION_MODE_VALUE = {"散步": "wander", "自由活动": "wander", "走走": "wa
                      "跟随": "follow", "跟着我": "follow",
                      "待着": "still", "不动": "still", "原地": "still"}
 # 模型回复里的动作标签：【动作：跳跃】/【动作：散步】
-ACTION_TAG_RE = re.compile(r"【动作[:：]([^】]+)】")
+ACTION_TAG_RE = re.compile(r"【动作[:：]\s*([^】]+)】")
+
+# 主动回应的冷却时间（秒）：互动后多久内只主动回应一次
+ACTIVE_REPLY_COOLDOWN = 30
 
 # 身体状态注入的提示词（注入到每次对话的 system_prompt）
 BODY_STATE_PREFIX = "\n\n【身体状态】你是桌面上的一只大肥鱼桌宠："
@@ -115,7 +118,7 @@ class DafeiyuPetPlugin(Star):
         if path.startswith("/pet/input"):
             return await self._inject_input(body)
         if path.startswith("/pet/event"):
-            return self._collect_event(body)
+            return await self._collect_event(body)
         return {"ok": False, "error": "unknown path"}
 
     async def _inject_input(self, body: dict) -> dict:
@@ -142,8 +145,8 @@ class DafeiyuPetPlugin(Star):
         logger.info(f"桌宠输入已注入 QQ 会话: {text[:30]}")
         return {"ok": True}
 
-    def _collect_event(self, body: dict) -> dict:
-        """互动事件入内存（身体状态注入用），同类 30 秒去重"""
+    async def _collect_event(self, body: dict) -> dict:
+        """互动事件入内存（身体状态注入用），同类 30 秒去重，触发主动回应"""
         etype = str(body.get("type") or "").strip()
         detail = str(body.get("detail") or "").strip()
         if not etype:
@@ -157,7 +160,53 @@ class DafeiyuPetPlugin(Star):
             self._last_mode = detail
         self._pet_events.append({"type": etype, "detail": detail, "at": now})
         self._pet_events = self._pet_events[-5:]
+        logger.info(f"桌宠事件已收集: {etype}/{detail}，当前 {len(self._pet_events)} 条")
+        # 主动回应：互动事件触发模型回应（30 秒冷却）
+        if etype in ("click", "feed", "drag", "sway", "jump", "stretch"):
+            await self._maybe_active_reply(etype, detail)
         return {"ok": True}
+
+    @staticmethod
+    def _event_desc(etype: str, detail: str) -> str:
+        """事件 → 一句互动描述"""
+        if etype == "click":
+            return "主人刚才戳了你一下"
+        if etype == "feed":
+            return f"主人刚才喂了你{detail}"
+        if etype == "drag":
+            return "主人刚才拖着你玩"
+        if etype == "sway":
+            return "主人刚才摇晃了你"
+        if etype == "jump":
+            return "你刚才跳了一下"
+        if etype == "stretch":
+            return "你刚才伸了个懒腰"
+        return ""
+
+    async def _maybe_active_reply(self, etype: str, detail: str) -> None:
+        """互动后主动让模型回应一次（30 秒冷却），回应走管线进历史"""
+        now = time.time()
+        if now - getattr(self, "_last_active_reply", 0) < ACTIVE_REPLY_COOLDOWN:
+            return
+        desc = self._event_desc(etype, detail)
+        if not desc:
+            return
+        qq = str(self.config.get("master_qq") or "").strip()
+        platform = self.context.get_platform(PlatformAdapterType.AIOCQHTTP)
+        if not qq or platform is None:
+            return
+        msg = AstrBotMessage()
+        msg.type = MessageType.FRIEND_MESSAGE
+        msg.self_id = qq
+        msg.session_id = qq
+        msg.message_id = f"pet_active_{int(time.time() * 1000)}"
+        msg.sender = MessageMember(qq, "主人")
+        msg.message = [Plain(f"{desc}，作为桌宠用一句话回应，保持人设")]
+        msg.message_str = f"{desc}，作为桌宠用一句话回应，保持人设"
+        msg.raw_message = None
+        self._last_active_reply = now
+        await platform.handle_msg(msg)
+        logger.info(f"主动回应已触发: {desc}")
 
     # ---------- 身体状态注入 ----------
 
@@ -167,31 +216,23 @@ class DafeiyuPetPlugin(Star):
         for ev in self._pet_events:
             if time.time() - ev["at"] > 300:
                 continue
-            t = ev["type"]
-            d = ev.get("detail") or ""
-            if t == "click":
-                parts.append("主人刚才戳了你一下")
-            elif t == "feed":
-                parts.append(f"主人刚才喂了你{d}")
-            elif t == "drag":
-                parts.append("主人刚才拖着你玩")
-            elif t == "sway":
-                parts.append("你刚才摇晃了一下")
-            elif t == "jump":
-                parts.append("你刚才跳了一下")
-            elif t == "stretch":
-                parts.append("你刚才伸了个懒腰")
+            d = self._event_desc(ev["type"], ev.get("detail") or "")
+            if d:
+                parts.append(d)
         return "，".join(parts)
 
-    @filter.on_llm_request(priority=5)
+    @filter.on_llm_request(priority=-10)
     async def inject_body_state(self, event: AstrMessageEvent, req):
-        """每次对话前把桌宠身体状态注入提示词"""
+        """每次对话前把桌宠身体状态注入提示词（priority 靠后，避免被后续组装覆盖）"""
         state = self._body_state_text()
         if state:
             req.system_prompt = (req.system_prompt or "") + BODY_STATE_PREFIX + state
-        # 提示模型可以输出动作标签
+        # 动作标签说明：禁止括号描述动作、标签不显示、别乱切模式
         req.prompt = (req.prompt or "") + (
-            "\n（如需让桌宠做动作，在回复末尾加【动作：跳跃/摇晃/伸懒腰/散步/跟随/待着】）"
+            "\n（如需让桌宠做动作，在回复末尾加【动作：跳跃/摇晃/伸懒腰/散步/跟随/待着】。"
+            "该标签只用于触发动作，不会显示给用户，不要写在正文里。"
+            "不要在回复里用括号描述动作，如不要写（摇了摇尾巴）。"
+            "除非用户明确要求，不要主动切换桌宠的移动模式。）"
         )
 
     # ---------- 回复处理：同步桌宠 + 动作执行 ----------
@@ -204,11 +245,14 @@ class DafeiyuPetPlugin(Star):
             return
         texts = [comp.text for comp in result.chain if isinstance(comp, Plain) and comp.text]
         full = " ".join(texts)
-        # 动作标签：先执行，再从显示文本里去掉
+        # 动作标签：先执行，再从所有显示文本里去掉（QQ 和气泡都不显示）
         action = None
         m = ACTION_TAG_RE.search(full)
         if m:
             action = m.group(1).strip()
+            for comp in result.chain:
+                if isinstance(comp, Plain) and comp.text:
+                    comp.text = ACTION_TAG_RE.sub("", comp.text).strip()
             full = ACTION_TAG_RE.sub("", full).strip()
         if action and pet_alive():
             await self._execute_action(action)
