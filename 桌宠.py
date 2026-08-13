@@ -36,7 +36,7 @@ except:
     GPU_AVAILABLE = False
 
 import requests
-from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF
+from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRect, QRectF
 from PySide6.QtGui import (QPainter, QPixmap, QFont, QColor, QIcon, QFontMetrics,
                            QPolygonF)
 from PySide6.QtWidgets import (QApplication, QWidget, QMenu, QSystemTrayIcon,

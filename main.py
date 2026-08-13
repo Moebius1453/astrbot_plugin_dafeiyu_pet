@@ -41,16 +41,23 @@ PET_DIR = os.path.dirname(os.path.abspath(__file__))
 PET_SCRIPT = os.path.join(PET_DIR, PET_PY)
 
 ACTION_MAP = {
-    "跳跃": "jump", "跳": "jump",
-    "摇晃": "sway", "摇摆": "sway",
-    "伸懒腰": "stretch", "伸腰": "stretch",
-    "散步": "mode", "自由活动": "mode", "走走": "mode",
-    "跟随": "mode", "跟着我": "mode",
-    "待着": "mode", "不动": "mode", "原地": "mode",
+    "跳跃": "jump", "跳": "jump", "跳一跳": "jump", "跳一下": "jump", "蹦": "jump",
+    "摇晃": "sway", "摇摆": "sway", "摇一摇": "sway", "晃一晃": "sway",
+    "伸懒腰": "stretch", "伸腰": "stretch", "伸个懒腰": "stretch",
+    "散步": "mode", "自由活动": "mode", "走走": "mode", "去散步": "mode",
+    "跟随": "mode", "跟着我": "mode", "跟着鼠标": "mode", "跟随鼠标": "mode",
+    "跟鼠标": "mode", "跟随光标": "mode", "跟着光标": "mode", "跟我走": "mode",
+    "待着": "mode", "不动": "mode", "原地": "mode", "原地不动": "mode",
+    "别动": "mode", "站着": "mode", "停": "mode",
 }
 ACTION_MODE_VALUE = {"散步": "wander", "自由活动": "wander", "走走": "wander",
-                     "跟随": "follow", "跟着我": "follow",
-                     "待着": "still", "不动": "still", "原地": "still"}
+                     "去散步": "wander",
+                     "跟随": "follow", "跟着我": "follow", "跟着鼠标": "follow",
+                     "跟随鼠标": "follow", "跟鼠标": "follow", "跟随光标": "follow",
+                     "跟着光标": "follow", "跟我走": "follow",
+                     "待着": "still", "不动": "still", "原地": "still",
+                     "原地不动": "still", "别动": "still", "站着": "still",
+                     "停": "still"}
 # 模型回复里的动作标签：【动作：跳跃】/【动作：散步】
 ACTION_TAG_RE = re.compile(r"【动作[:：]\s*([^】]+)】")
 
@@ -397,8 +404,11 @@ class DafeiyuPetPlugin(Star):
             yield event.plain_result(f"桌宠状态：{'运行中' if alive else '未运行'}")
 
     @filter.command("say")
-    async def say_to_pet(self, event: AstrMessageEvent, text: str):
+    async def say_to_pet(self, event: AstrMessageEvent, text: str = ""):
         """让桌宠说一句话：/say 你好 → 桌宠气泡显示"""
+        if not text.strip():
+            yield event.plain_result("用法：/say <文本>")
+            return
         if not pet_alive() and not self._start_pet():
             yield event.plain_result("桌宠未在运行且启动失败，检查日志")
             return
