@@ -83,7 +83,7 @@ def pet_alive() -> bool:
         return False
 
 
-@register("dafeiyu_pet", "Moebius", "桌宠是 QQ 智能体的身体", "0.4.0")
+@register("dafeiyu_pet", "Moebius", "桌宠是 QQ 智能体的身体", "1.1.0")
 class DafeiyuPetPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
