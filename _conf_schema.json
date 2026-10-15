@@ -1,9 +1,15 @@
 {
     "master_qq": {
         "description": "主人 QQ 号",
-        "hint": "你的 QQ 号。桌宠输入会注入到这个 QQ 的私聊会话里，与 QQ 对话共用同一人格和记忆。",
+        "hint": "你的 QQ 号，仅该 QQ 的私聊可控制桌宠和同步回复。建议明确填写；留空时绑定本次运行的首个私聊发送者。",
         "type": "string",
         "default": ""
+    },
+    "proactive_enabled": {
+        "description": "启用桌宠主动回应",
+        "hint": "默认关闭。开启后，点击、喂食、拖拽可能触发回应，安静时偶尔主动说话。使用主人会话的模型与人格，独立生成，仅显示桌宠气泡，不发送 QQ、不写聊天历史、不执行工具；会产生模型调用费用。需要先由主人私聊一次。",
+        "type": "bool",
+        "default": false
     },
     "bubble_enabled": {
         "description": "显示桌宠气泡",

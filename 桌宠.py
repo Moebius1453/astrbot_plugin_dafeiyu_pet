@@ -62,8 +62,11 @@ else:
     BUNDLE_DIR = APP_DIR
     PYTHONW = os.path.join(APP_DIR, ".venv", "Scripts", "pythonw.exe")
 SPRITE_DIR = os.path.join(BUNDLE_DIR, "sprites")
-# 配置存 AstrBot data 目录（插件启动时注入），手动运行退回插件目录
-CONFIG_PATH = os.path.join(os.environ.get("ASTRBOT_DATA_DIR") or APP_DIR, "config.json")
+DATA_DIR = os.environ.get("PET_DATA_DIR") or os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "astrbot_plugin_dafeiyu_pet"
+)
+os.makedirs(DATA_DIR, exist_ok=True)
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 
 BUBBLE_H = 56
 MARGIN = 4
@@ -877,7 +880,7 @@ class PetWindow(QWidget):
                 anchor=QRect(self.x(), self.y(), self.width(), self.height()),
             )
         except Exception as e:
-            with open(os.path.join(APP_DIR, "bubble_error.log"), "a", encoding="utf-8") as f:
+            with open(os.path.join(DATA_DIR, "bubble_error.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.time()}] say 异常: {e!r}\n")
 
     def _wake_from_still(self):
