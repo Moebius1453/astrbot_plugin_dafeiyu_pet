@@ -4,6 +4,8 @@
 
 基于 [1190fasheqi/dafeiyu-pet](https://github.com/1190fasheqi/dafeiyu-pet) 改造。
 
+![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)
+
 ## 更新日志
 
 ### v1.1.1 · 2026.10.15
