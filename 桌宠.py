@@ -12,6 +12,7 @@ import json
 import math
 import os
 import random
+import queue
 import socket
 import subprocess
 import sys
@@ -116,6 +117,11 @@ FOODS = ["🐟", "🍰", "🍭", "🍡", "💎"]
 
 MAX_BUBBLE_CHARS = 40   # 气泡单条文本上限
 MAX_BUBBLE_SEGMENTS = 3  # 长文本最多分段数（每段依次显示）
+BUBBLE_ENABLED = os.environ.get("PET_BUBBLE_ENABLED", "1") != "0"
+try:
+    MAX_BUBBLE_CHARS = max(1, min(200, int(os.environ.get("PET_BUBBLE_MAX_CHARS", "40"))))
+except ValueError:
+    MAX_BUBBLE_CHARS = 40
 SENTENCE_ENDS = ("。", "！", "？", "…", "……", "～")
 
 
@@ -418,20 +424,15 @@ class BubbleWindow(QWidget):
         max_w = self.MAX_W - 20
         lines = []
         cur = ""
-        for ch in text:
+        for index, ch in enumerate(text):
             if fm.horizontalAdvance(cur + ch) > max_w:
+                if len(lines) == 1:
+                    return [lines[0], fm.elidedText(cur + text[index:],
+                                                  Qt.TextElideMode.ElideRight, max_w)]
                 lines.append(cur)
                 cur = ch
-                if len(lines) == 2:
-                    break
             else:
                 cur += ch
-        if len(lines) == 2:
-            second = cur
-            while second and fm.horizontalAdvance(second + "…") > max_w:
-                second = second[:-1]
-            lines[1] = second + "…"
-            return lines
         lines.append(cur)
         return lines
 
@@ -445,7 +446,8 @@ class BubbleWindow(QWidget):
         """智能选位：头顶 → 左 → 右 → 下方，全程 clamp 在屏幕内"""
         bw, bh = self._bubble_size()
         self.setFixedSize(bw, bh)
-        screen = QApplication.primaryScreen().availableGeometry()
+        display = QApplication.screenAt(anchor.center()) if anchor is not None else None
+        screen = (display or QApplication.primaryScreen()).availableGeometry()
         if anchor is None:
             anchor = QRect(screen.center().x() - 100, screen.center().y() - 100, 200, 100)
         gap = 8
@@ -549,6 +551,7 @@ class PetWindow(QWidget):
         self.dir = "down"
         self.facing = 1
         self.target = None
+        self._direction_move = False
         self.rest_until = 0
         self.cur_speed = 0.0
         self.prev_key = None
@@ -572,7 +575,8 @@ class PetWindow(QWidget):
         self.ds_busy = False
         self.chat_history = []  # 对话历史
         self.max_history = 40   # 最多记录40条
-        self._say_queue = []    # 后台线程→主线程的气泡消息队列
+        self._ui_queue = queue.SimpleQueue()
+        self._weather_busy = False
         
         # 聊天暂停标志
         self.chat_paused = False
@@ -690,11 +694,39 @@ class PetWindow(QWidget):
     def tick(self):
         self.t += 1
 
-        # 处理后台线程（DeepSeek 等）排队的气泡消息，Qt 界面必须在主线程更新
-        if self._say_queue:
-            for text in self._say_queue:
-                self.say(text)
-            self._say_queue.clear()
+        while True:
+            try:
+                kind, payload = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "say":
+                self.say(payload)
+            elif kind == "action":
+                self._exec_action(payload)
+            elif kind == "weather":
+                self._weather_busy = False
+                self.say(payload)
+            elif kind == "request":
+                path, body, reply = payload
+                try:
+                    if path == "/state":
+                        result = {"ok": True, "state": self._state_snapshot()}
+                    elif path == "/say":
+                        text = body.get("text")
+                        if not isinstance(text, str) or not text.strip():
+                            result = {"ok": False, "error": "empty text"}
+                        else:
+                            self.say(text)
+                            result = {"ok": not BUBBLE_ENABLED or self.bubble_window.isVisible(),
+                                      "state": self._state_snapshot()}
+                    else:
+                        result = {"ok": self._exec_action(body), "state": self._state_snapshot()}
+                    reply.put(result)
+                except Exception as exc:
+                    reply.put({"ok": False, "error": str(exc)})
+            elif kind == "quit":
+                self.quit_app()
+                return
 
         self.check_system_status()
         
@@ -727,16 +759,17 @@ class PetWindow(QWidget):
             else:
                 tx = max(geo.left(), min(geo.right() - self.width(), cursor.x() - self.width() / 2))
                 ty = max(geo.top(), min(geo.bottom() - self.height(), cursor.y() - 90))
-                self.target = (tx, ty)
-        elif self.mode == "wander":
+                self.target = (tx + self.width() / 2, ty + self.height() / 2)
+        elif self.mode == "wander" or self._direction_move:
             if self.target is None:
                 if now_ms < self.rest_until:
                     self._maybe_idle_action()
                     self.update()
                     return
                 geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-                self.target = (random.randint(geo.left() + 40, geo.right() - self.width() - 40),
-                               random.randint(geo.top() + 40, geo.bottom() - self.height() - 40))
+                left, right, top, bottom = self._movement_bounds(geo, 40)
+                self.target = (random.randint(left, right) + self.width() / 2,
+                               random.randint(top, bottom) + self.height() / 2)
         else:
             self._maybe_idle_action()
             self.update()
@@ -747,11 +780,15 @@ class PetWindow(QWidget):
             dx, dy = self.target[0] - cx, self.target[1] - cy
             dist = (dx * dx + dy * dy) ** 0.5
             if dist < 12:
+                if self._direction_move:
+                    self.move(round(self.target[0] - self.width() / 2),
+                              round(self.target[1] - self.height() / 2))
+                    self._direction_move = False
                 self.target = None
                 self.rest_until = self.t * TICK + random.randint(8000, 18000)
                 self._set_dir("down")
             else:
-                step = self.cur_speed * TICK / 1000.0
+                step = min(dist, self.cur_speed * TICK / 1000.0)
                 nx, ny = cx + dx / dist * step, cy + dy / dist * step
                 self.move(int(nx - self.width() / 2), int(ny - self.height() / 2))
                 if abs(dx) > abs(dy) * 1.15:
@@ -778,9 +815,38 @@ class PetWindow(QWidget):
                 self._report_event("stretch")
             # 原 0.8~0.9 的随机台词分支已屏蔽（说话权归 AstrBot）
 
+    def _state_snapshot(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        bubble = self.bubble_window
+        return {
+            "sampled_at": time.time(),
+            "coordinate_system": "全局屏幕逻辑像素，x向右、y向下；position为窗口左上角，target为窗口中心",
+            "mode": self.mode,
+            "mode_description": {"wander": "自由散步", "follow": "跟随鼠标", "still": "原地待着"}[self.mode],
+            "direction_move": self._direction_move,
+            "center": {"x": self.x() + self.width() / 2, "y": self.y() + self.height() / 2},
+            "screens": [{"name": s.name(), "x": s.availableGeometry().x(),
+                         "y": s.availableGeometry().y(), "width": s.availableGeometry().width(),
+                         "height": s.availableGeometry().height(), "scale": s.devicePixelRatio()}
+                        for s in QApplication.screens()],
+            "position": {"x": self.x(), "y": self.y()},
+            "size": {"width": self.width(), "height": self.height()},
+            "screen": {"name": screen.name(), "x": geo.x(), "y": geo.y(),
+                       "width": geo.width(), "height": geo.height()},
+            "target": list(self.target) if self.target is not None else None,
+            "target_coordinates": "窗口中心的屏幕逻辑坐标",
+            "moving": self.target is not None and not self.dragging and not self.chat_paused,
+            "visible": self.isVisible(),
+            "bubble": {"enabled": BUBBLE_ENABLED, "max_chars": MAX_BUBBLE_CHARS,
+                       "visible": bubble.isVisible(), "x": bubble.x(), "y": bubble.y(),
+                       "width": bubble.width(), "height": bubble.height(),
+                       "text": "\n".join(bubble._lines)},
+        }
+
     def _queue_say(self, text):
         """后台线程调用：只入队，由主线程 tick 统一弹出显示（线程安全）"""
-        self._say_queue.append(text)
+        self._ui_queue.put(("say", text))
 
     def _report_event(self, event_type, detail=""):
         """互动/动作事件上报插件（身体状态注入用），失败不打扰"""
@@ -796,7 +862,12 @@ class PetWindow(QWidget):
         threading.Thread(target=worker, daemon=True).start()
 
     def say(self, text, inner=False):
-        if text == self.last_line and not text.startswith("天气"):
+        if not BUBBLE_ENABLED:
+            self.bubble_window._hide_timer.stop()
+            self.bubble_window._queue.clear()
+            self.bubble_window.hide()
+            return
+        if not text.strip():
             return
         self.last_line = text
         try:
@@ -874,6 +945,7 @@ class PetWindow(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            self.chat_paused = False
             if self.dragging:
                 self.dragging = False
                 self.drag_offset = None
@@ -895,27 +967,31 @@ class PetWindow(QWidget):
             self._click_timer.stop()
             self.food_panel.popup_at(self.x() + self.width() / 2, self.y() + BUBBLE_H)
 
+    def _movement_bounds(self, geo, margin):
+        dx = max(0, geo.width() - self.width())
+        dy = max(0, geo.height() - self.height())
+        mx, my = min(margin, dx // 2), min(margin, dy // 2)
+        return geo.left() + mx, geo.left() + dx - mx, geo.top() + my, geo.top() + dy - my
+
     def _set_direction_target(self, direction):
-        """方向指令：把目标设到屏幕对应位置，鱼会走过去"""
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        cx, cy = self.x() + self.width() / 2, self.y() + self.height() / 2
-        margin = 60
+        left, right, top, bottom = self._movement_bounds(geo, 60)
+        x = max(left, min(right, self.x()))
+        y = max(top, min(bottom, self.y()))
         targets = {
-            "right": (geo.right() - self.width() - margin, cy),
-            "left": (geo.left() + margin, cy),
-            "up": (cx, geo.top() + margin),
-            "down": (cx, geo.bottom() - self.height() - margin),
-            "top_left": (geo.left() + margin, geo.top() + margin),
-            "top_right": (geo.right() - self.width() - margin, geo.top() + margin),
-            "bottom_left": (geo.left() + margin, geo.bottom() - self.height() - margin),
-            "bottom_right": (geo.right() - self.width() - margin, geo.bottom() - self.height() - margin),
+            "right": (right, y), "left": (left, y),
+            "up": (x, top), "down": (x, bottom),
+            "top_left": (left, top), "top_right": (right, top),
+            "bottom_left": (left, bottom), "bottom_right": (right, bottom),
         }
         if direction not in targets:
-            return
-        if self.mode != "wander":
-            self.set_mode("wander")   # still/follow 不处理自定义目标，先切回闲逛
-        self.target = targets[direction]
+            return False
+        self.set_mode("still")
+        tx, ty = targets[direction]
+        self.target = (tx + self.width() / 2, ty + self.height() / 2)
+        self._direction_move = True
         self.rest_until = 0
+        return True
 
     def _exec_action(self, body):
         """插件发来的动作指令（模型通过【动作】标签或关键词触发）"""
@@ -929,11 +1005,12 @@ class PetWindow(QWidget):
                 self.action, self.action_t = "stretch", 1.0
             elif action == "mode":
                 mode = body.get("value", "wander")
-                if mode in ("wander", "follow", "still"):
-                    self.set_mode(mode)
-                    self._report_event("mode", mode)
+                if mode not in ("wander", "follow", "still"):
+                    return False
+                self.set_mode(mode)
+                self._report_event("mode", mode)
             elif action == "direction":
-                self._set_direction_target(body.get("value", ""))
+                return self._set_direction_target(body.get("value", ""))
             else:
                 return False
             return True
@@ -971,9 +1048,14 @@ class PetWindow(QWidget):
         return "汕头" """
 
     def _get_weather(self):
+        if self._weather_busy:
+            return
+        self._weather_busy = True
+        city = self.cfg.get("city", "汕头")
+        threading.Thread(target=self._fetch_weather, args=(city,), daemon=True).start()
+
+    def _fetch_weather(self, city):
         try:
-            city = self.cfg.get("city", "汕头")
-            print("当前城市:", city)
 
             url = f"https://wttr.in/{city}?format=j1"
 
@@ -1008,11 +1090,12 @@ class PetWindow(QWidget):
 
             desc = weather_map.get(raw_weather, raw_weather)
 
-            self.say(f"{city}今天{temp}°，天气{desc}")
+            message = f"{city}今天{temp}°，天气{desc}"
 
         except Exception as e:
             print("天气错误:", repr(e))
-            self.say("天气获取失败")
+            message = "天气获取失败"
+        self._ui_queue.put(("weather", message))
     
 
     def _build_menu(self):
@@ -1061,6 +1144,7 @@ class PetWindow(QWidget):
     # ---------- 功能 ----------
     def set_mode(self, mode):
         self.mode = mode
+        self._direction_move = False
         self.target = None
         self.cfg["mode"] = mode
 
@@ -1146,13 +1230,15 @@ def start_pet_http_server(pet):
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
                 path = self.path.split("?", 1)[0]
-                if path.startswith("/action"):
-                    result = {"ok": pet._exec_action(body)}
+                if path not in ("/say", "/action", "/state") or not isinstance(body, dict):
+                    result = {"ok": False, "error": "invalid request"}
                 else:
-                    text = body.get("text", "")
-                    if text:
-                        pet._queue_say(text)  # 截断/断句由 say() 统一处理
-                    result = {"ok": True}
+                    reply = queue.Queue(maxsize=1)
+                    pet._ui_queue.put(("request", (path, body, reply)))
+                    try:
+                        result = reply.get(timeout=3)
+                    except queue.Empty:
+                        result = {"ok": False, "error": "UI thread did not acknowledge request"}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1180,7 +1266,7 @@ def start_pet_heartbeat(pet):
             fail += 1
             if fail >= 3:
                 print("AstrBot 失联，桌宠自动退出")
-                QTimer.singleShot(0, pet.quit_app)
+                pet._ui_queue.put(("quit", None))
                 return
 
 

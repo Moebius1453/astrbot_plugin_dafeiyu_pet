@@ -104,6 +104,18 @@ class DafeiyuPetPlugin(Star):
         qq = str(self.config.get("master_qq") or "").strip()
         return qq or self._observed_qq
 
+    def _is_owner_event(self, event: AstrMessageEvent) -> bool:
+        if event.get_platform_name() != "aiocqhttp" or not event.is_private_chat():
+            return False
+        sender = str(event.get_sender_id() or "")
+        if not sender:
+            return False
+        owner = self._resolve_qq()
+        if not owner:
+            self._observed_qq = sender
+            owner = sender
+        return sender == owner
+
     async def initialize(self):
         self._http = httpx.AsyncClient(timeout=10)
         self._loop = asyncio.get_running_loop()
@@ -209,6 +221,8 @@ class DafeiyuPetPlugin(Star):
 
     async def _maybe_active_reply(self, etype: str, detail: str) -> None:
         """用户互动后 30 秒内，75% 概率最多主动回应一次"""
+        if not await asyncio.to_thread(pet_alive):
+            return
         now = time.time()
         if now - getattr(self, "_last_active_reply", 0) < ACTIVE_REPLY_COOLDOWN:
             return
@@ -264,6 +278,8 @@ class DafeiyuPetPlugin(Star):
                     await asyncio.sleep(30)
 
     async def _proactive_say(self, instruction: str) -> None:
+        if not await asyncio.to_thread(pet_alive):
+            return
         qq = self._resolve_qq()
         platform = self.context.get_platform(PlatformAdapterType.AIOCQHTTP)
         if not qq or platform is None:
@@ -297,67 +313,123 @@ class DafeiyuPetPlugin(Star):
     @filter.on_llm_request(priority=-10)
     async def inject_body_state(self, event: AstrMessageEvent, req):
         """每次对话前把桌宠身体状态注入提示词（priority 靠后，避免被后续组装覆盖）"""
-        # 记录最近对话的 QQ 发送者（master_qq 未配置时作为注入目标兜底）+ 用户输入时间
-        if event.get_platform_name() == "aiocqhttp":
-            sid = event.get_sender_id()
-            if sid:
-                self._observed_qq = str(sid)
-                mid = getattr(getattr(event, "message_obj", None), "message_id", "") or ""
-                if not mid.startswith("pet_auto_"):   # 主动消息不算用户输入
-                    self._last_user_input = time.time()
+        if not self._is_owner_event(event) or not await asyncio.to_thread(pet_alive):
+            return
+        mid = str(getattr(event.message_obj, "message_id", "") or "")
+        if not mid.startswith("pet_auto_"):
+            self._last_user_input = time.time()
+        try:
+            response = await self._http.post(f"{PET_URL}/state", json={}, timeout=4)
+            response.raise_for_status()
+            snapshot = response.json()
+            live = snapshot.get("state") if snapshot.get("ok") is True else None
+        except (httpx.HTTPError, ValueError):
+            live = None
         state = self._body_state_text()
+        if isinstance(live, dict):
+            self._last_mode = live.get("mode", self._last_mode)
+            state = self._body_state_text() + "\n实时位置（仅此刻有效）：" + json.dumps(live, ensure_ascii=False)
+        else:
+            state += "\n实时位置未知，不能从过去位置推断当前位置。"
         if state:
             req.system_prompt = (req.system_prompt or "") + BODY_STATE_PREFIX + state
-        # 硬性格式规则放 system 侧（模型对 system 遵守度更高）
         req.system_prompt = (req.system_prompt or "") + (
-            "\n【回复格式】每次回复的末尾都必须带【动作：X】标签，X 只能从以下选择一个："
-            "跳跃/摇晃/伸懒腰/散步/跟随/待着。不需要动作时就写【动作：待着】。"
-            "这个标签只用于控制桌宠动作，不会显示给用户，所以绝不要省略。"
-            "不要在回复正文里用括号描述动作，如不要写（摇了摇尾巴）。"
-        )
-        # 用户消息末尾再提醒一次（防长上下文稀释）
-        req.prompt = (req.prompt or "") + (
-            "\n（记得在回复末尾输出【动作：X】标签，例如你要跳跃就写【动作：跳跃】）"
+            "\n【桌宠身体】这是你在 Windows 桌面上的身体，不是 Minecraft 角色。"
+            "需要移动或做动作时调用 pet_action；方向以桌宠所在屏幕为准。"
+            "需要知道当前位置、移动模式或确认是否到达时调用 pet_state，不要猜测位置。"
+            "direction是走到当前屏幕指定边缘或角落，到达后停留；不是持续朝该方向散步。"
+            "普通聊天、否定动作或仅讨论动作时不要调用工具；查询位置只用pet_state。"
+            "正常回复会自动显示为气泡，不必调用工具来说话。"
+            "不要输出【动作：X】标签；工具未成功接收时不要声称动作已执行。"
         )
 
     # ---------- 回复处理：同步桌宠 + 动作执行 ----------
 
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(priority=100)
     async def sync_to_pet(self, event: AstrMessageEvent):
         """智能体回复 → 同步桌宠气泡 + 解析动作标签执行
         【测试中】暂不屏蔽标签（保留显示），观察动作触发情况"""
+        if not self._is_owner_event(event):
+            return
         result = event.get_result()
         if result is None or not result.is_llm_result():
             return
         texts = [comp.text for comp in result.chain if isinstance(comp, Plain) and comp.text]
-        full = " ".join(texts)
-        action = None
-        m = ACTION_TAG_RE.search(full)
-        if m:
-            action = m.group(1).strip()
-            logger.info(f"检测到动作标签: {action}")
-            # 从显示文本隐藏标签（QQ 和气泡都不显示）
-            for comp in result.chain:
-                if isinstance(comp, Plain) and comp.text:
-                    comp.text = ACTION_TAG_RE.sub("", comp.text).strip()
-            full = ACTION_TAG_RE.sub("", full).strip()
-        else:
-            # 兜底：模型没输出标签时，从用户消息推断动作
-            action = self._infer_action(event.message_str or "")
-            if action:
-                logger.info(f"无标签，从用户消息推断动作: {action}")
-        if action:
-            if pet_alive():
-                await self._execute_action(action)
-            else:
-                logger.warning("动作未执行：桌宠不在线")
-        else:
-            logger.info(f"回复无动作标签: {full[:40]}")
-        if full and pet_alive():
+        full = ACTION_TAG_RE.sub("", " ".join(texts)).strip()
+        for comp in result.chain:
+            if isinstance(comp, Plain) and comp.text:
+                comp.text = ACTION_TAG_RE.sub("", comp.text).strip()
+        if not await asyncio.to_thread(pet_alive):
+            return
+        if full:
             try:
-                await self._http.post(f"{PET_URL}/say", json={"text": full})
+                await self._show_pet_text(full)
             except Exception as e:
                 logger.error(f"同步桌宠失败: {e}")
+
+    async def _show_pet_text(self, text: str) -> dict:
+        response = await self._http.post(f"{PET_URL}/say", json={"text": text})
+        response.raise_for_status()
+        data = response.json()
+        if data.get("ok") is not True or not isinstance(data.get("state"), dict):
+            raise ValueError("桌宠未返回界面显示确认，请确认桌宠进程已更新并重新启动")
+        bubble = data["state"].get("bubble", {})
+        logger.info("气泡界面确认: visible=%s, rect=%s, chars=%s",
+                    bubble.get("visible"),
+                    [bubble.get(k) for k in ("x", "y", "width", "height")], len(text))
+        return data["state"]
+
+    @filter.llm_tool(name="pet_state")
+    async def pet_state(self, event: AstrMessageEvent) -> str:
+        """读取 Windows 桌宠实时位置、屏幕边界、模式、移动目标及气泡可见状态；移动后用此确认是否到达，坐标为屏幕全局逻辑像素，不是 Minecraft 坐标。"""
+        if not self._is_owner_event(event):
+            return "无法查询：仅限主人 QQ 私聊。"
+        try:
+            response = await self._http.post(f"{PET_URL}/state", json={})
+            response.raise_for_status()
+            data = response.json()
+            if data.get("ok") is not True or not isinstance(data.get("state"), dict):
+                return "无法查询：桌宠没有返回有效状态，请检查版本和界面线程。"
+            return json.dumps(data["state"], ensure_ascii=False)
+        except (httpx.HTTPError, ValueError):
+            return "无法查询：桌宠未运行或通信失败。"
+
+    @filter.llm_tool(name="pet_action")
+    async def pet_action(self, event: AstrMessageEvent, action: str, value: str = "") -> str:
+        """控制 Windows 桌宠；direction走到当前屏幕边缘或角落后停留，移动中用pet_state查进度，不得把接收指令当成到达。
+
+        Args:
+            action(string): jump 跳一下，sway 摇晃，stretch 伸懒腰，mode 切换移动模式，direction 移动到当前屏幕的边缘或角落；普通聊天或否定指令不调用。
+            value(string): mode必填wander自由散步、follow跟随鼠标、still停止移动；direction必填left左边、right右边、up顶部、down底部、top_left左上、top_right右上、bottom_left左下、bottom_right右下；jump/sway/stretch必须留空。
+        """
+        if not self._is_owner_event(event):
+            return "未执行：仅限主人 QQ 私聊控制桌宠。"
+        if action in ("jump", "sway", "stretch") and not value:
+            payload = {"action": action}
+        elif action == "mode" and value in ("wander", "follow", "still"):
+            payload = {"action": action, "value": value}
+        elif action == "direction" and value in (
+            "left", "right", "up", "down", "top_left", "top_right", "bottom_left", "bottom_right",
+        ):
+            payload = {"action": action, "value": value}
+        else:
+            return "未执行：动作或参数无效，请按工具参数说明选择。"
+        if not await asyncio.to_thread(pet_alive):
+            return "未执行：桌宠未运行，请主人先使用 /pet start。"
+        try:
+            response = await self._http.post(f"{PET_URL}/action", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("ok") is not True:
+                return "未执行：桌宠拒绝了动作。"
+            state = data.get("state")
+            if not isinstance(state, dict):
+                return "结果未知：桌宠没有返回执行后的状态，请检查版本。"
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(f"桌宠工具请求失败: {exc}")
+            return "结果未知：未收到桌宠的有效确认，不要声称已完成。"
+        logger.info(f"桌宠工具已接收: {action}/{value}")
+        return "界面线程已处理动作；坐标与目标如下，稍后调用 pet_state 确认移动结果：\n" + json.dumps(state, ensure_ascii=False)
 
     async def _execute_action(self, action_text: str):
         action = ACTION_MAP.get(action_text)
@@ -378,14 +450,40 @@ class DafeiyuPetPlugin(Star):
     @staticmethod
     def _infer_action(user_msg: str) -> str:
         """模型没输出标签时，从用户消息推断动作关键词"""
-        for keyword in ACTION_MAP:
-            if keyword in user_msg:
-                return keyword
+        commands = {
+            "jump": ("跳一下", "跳一跳", "跳跃", "蹦一下"),
+            "sway": ("摇一摇", "晃一晃", "摇晃", "摇摆"),
+            "stretch": ("伸个懒腰", "伸懒腰", "伸腰"),
+            "wander": tuple(k for k, v in ACTION_MODE_VALUE.items() if v == "wander"),
+            "follow": ("跟着我的鼠标", "跟随我的鼠标", "跟着我", "跟着鼠标", "跟随鼠标",
+                       "跟鼠标", "跟随光标", "跟着光标", "跟我走", "跟随"),
+            "still": ("待着", "别动", "不要动", "原地不动", "站着", "停下"),
+        }
+        canonical = {"jump": "跳跃", "sway": "摇晃", "stretch": "伸懒腰",
+                     "wander": "散步", "follow": "跟随", "still": "待着"}
+        text = user_msg.strip().rstrip("。！!～~")
+        text = re.sub(r"^(?:请你|请|你|大肥鱼)[，,\s]*", "", text)
+        text = re.sub(r"(?:吧|呀|啊)$", "", text)
+        text = re.sub(r"一下$", "", text)
+        if re.search(r"(?:别|不要|不许|禁止|不用)", text) and text not in ("别动", "不要动"):
+            return ""
+        for action, phrases in commands.items():
+            for phrase in phrases:
+                candidate = re.sub(r"一下$", "", phrase)
+                if text == candidate:
+                    return canonical[action]
+        direction = re.fullmatch(r"(?:去|走到|到)?(?:屏幕)?(左上角|左下角|右上角|右下角)", text)
+        if direction:
+            return direction.group(1)
+        direction = re.fullmatch(r"(?:向|往)(左|右|上|下)(?:走|移动)?", text)
+        if direction:
+            return "向" + direction.group(1)
         return ""
 
     async def _send_pet_action(self, payload: dict):
         try:
-            await self._http.post(f"{PET_URL}/action", json=payload)
+            response = await self._http.post(f"{PET_URL}/action", json=payload)
+            response.raise_for_status()
         except Exception as e:
             logger.error(f"桌宠动作执行失败: {e}")
 
@@ -406,7 +504,12 @@ class DafeiyuPetPlugin(Star):
                 cwd=PET_DIR,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env={**os.environ, "ASTRBOT_DATA_DIR": get_astrbot_data_path()},
+                env={
+                    **os.environ,
+                    "ASTRBOT_DATA_DIR": get_astrbot_data_path(),
+                    "PET_BUBBLE_ENABLED": "1" if self.config.get("bubble_enabled", True) else "0",
+                    "PET_BUBBLE_MAX_CHARS": str(self.config.get("bubble_max_chars", 40)),
+                },
             )
             logger.info(f"桌宠进程已启动 (pid={self._pet_proc.pid})")
             return True
@@ -423,11 +526,15 @@ class DafeiyuPetPlugin(Star):
     @filter.command("pet")
     async def pet_control(self, event: AstrMessageEvent, action: str = "status"):
         """桌宠控制：/pet start 启动 | /pet stop 停止 | /pet status 状态"""
+        if not self._is_owner_event(event):
+            yield event.plain_result("桌宠仅限主人私聊控制，请检查 master_qq 配置")
+            return
         action = action.strip().lower()
         if action == "start":
-            ok = self._start_pet()
+            ok = await asyncio.to_thread(self._start_pet)
+            alive = ok and await asyncio.to_thread(pet_alive)
             yield event.plain_result(
-                "桌宠已在运行" if ok and pet_alive() else
+                "桌宠已在运行" if alive else
                 "桌宠启动失败，查看 AstrBot 日志" if not ok else
                 "桌宠启动中，稍后它会自己出现"
             )
@@ -435,21 +542,39 @@ class DafeiyuPetPlugin(Star):
             self._stop_pet()
             yield event.plain_result("已停止桌宠")
         else:
-            alive = pet_alive()
+            alive = await asyncio.to_thread(pet_alive)
             yield event.plain_result(f"桌宠状态：{'运行中' if alive else '未运行'}")
 
     @filter.command("say")
     async def say_to_pet(self, event: AstrMessageEvent, text: str = ""):
         """让桌宠说一句话：/say 你好 → 桌宠气泡显示"""
+        if not self._is_owner_event(event):
+            yield event.plain_result("桌宠仅限主人私聊控制，请检查 master_qq 配置")
+            return
         if not text.strip():
             yield event.plain_result("用法：/say <文本>")
             return
-        if not pet_alive() and not self._start_pet():
-            yield event.plain_result("桌宠未在运行且启动失败，检查日志")
-            return
+        if not await asyncio.to_thread(pet_alive):
+            if not await asyncio.to_thread(self._start_pet):
+                yield event.plain_result("桌宠未在运行且启动失败，检查日志")
+                return
+            for _ in range(50):
+                if await asyncio.to_thread(pet_alive):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                yield event.plain_result("桌宠尚未就绪，请稍后重试")
+                return
         try:
-            await self._http.post(f"{PET_URL}/say", json={"text": text})
-            yield event.plain_result(f"已让大肥鱼说：{text}")
+            state = await self._show_pet_text(text)
+            bubble = state["bubble"]
+            if bubble.get("enabled") is False:
+                yield event.plain_result("桌宠气泡已在配置中关闭，未显示文字；QQ 回复和动作不受影响")
+                return
+            yield event.plain_result(
+                f"桌宠界面已确认气泡显示：{text}\n"
+                f"位置：({bubble['x']}, {bubble['y']})，持续约 2.8 秒/段"
+            )
         except Exception as e:
             logger.error(f"桌宠通信失败: {e}")
             yield event.plain_result(f"桌宠通信失败：{e}")
@@ -457,8 +582,12 @@ class DafeiyuPetPlugin(Star):
     async def terminate(self):
         if self._idle_task:
             self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except asyncio.CancelledError:
+                pass
         if self._server:
-            self._server.shutdown()
+            await asyncio.to_thread(self._server.shutdown)
             self._server.server_close()
         if self._http:
             await self._http.aclose()

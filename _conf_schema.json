@@ -4,5 +4,17 @@
         "hint": "你的 QQ 号。桌宠输入会注入到这个 QQ 的私聊会话里，与 QQ 对话共用同一人格和记忆。",
         "type": "string",
         "default": ""
+    },
+    "bubble_enabled": {
+        "description": "显示桌宠气泡",
+        "hint": "控制所有桌宠文字气泡，不影响 QQ 回复和动作。保存配置后重载插件并重新启动桌宠生效。",
+        "type": "bool",
+        "default": true
+    },
+    "bubble_max_chars": {
+        "description": "气泡每段字数上限",
+        "hint": "每段最多显示的字符数，可设为 15；范围 1 到 200，默认 40。长文本仍最多分 3 段，受气泡两行宽度限制，过长会省略。保存后重载插件并重新启动桌宠生效。",
+        "type": "int",
+        "default": 40
     }
 }
